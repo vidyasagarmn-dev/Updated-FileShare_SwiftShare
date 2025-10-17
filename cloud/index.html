@@ -1,0 +1,348 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>SwiftShare — P2P File Transfer</title>
+
+  <!-- ✅ Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- ✅ Google Font -->
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600&display=swap" rel="stylesheet">
+
+  <!-- ✅ QR Code Library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+  <style>
+    body {
+      font-family: 'Poppins', sans-serif;
+      background: linear-gradient(135deg, #0f172a, #1e293b);
+      color: white;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 20px;
+    }
+    .card {
+      background: rgba(255,255,255,0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 1rem;
+      padding: 20px;
+      width: 95%;
+      max-width: 600px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+      margin-top: 20px;
+    }
+    button {
+      transition: all 0.2s ease-in-out;
+    }
+    button:hover {
+      transform: scale(1.05);
+    }
+    #log {
+      white-space: pre-wrap;
+      max-height: 250px;
+      overflow-y: auto;
+      background: rgba(0,0,0,0.3);
+      border-radius: 0.5rem;
+      padding: 10px;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+
+<body>
+  <h1 class="text-3xl font-bold text-teal-400 mb-2">
+    <img src="swiftshare.png" alt="SwiftShare Logo" width="150px" class="logo"> SwiftShare
+  </h1>
+  <p class="text-gray-300 text-sm mb-4">Seamless Peer-to-Peer File Transfer on LAN</p>
+
+  <!-- ✅ Connection Setup -->
+  <div class="card">
+    <h2 class="text-lg font-semibold mb-2 text-teal-300">Connection Setup</h2>
+    <div class="flex flex-col gap-2">
+      <label>Signaler URL:</label>
+      <input id="signaler" value="ws://192.168.1.7:3000"
+        class="bg-gray-800 text-gray-100 rounded px-3 py-1 border border-gray-700 focus:outline-none" />
+
+      <button id="connect" class="bg-teal-500 hover:bg-teal-600 px-4 py-2 rounded font-semibold">
+        Connect
+      </button>
+    </div>
+
+    <p id="me" class="mt-3 text-sm text-gray-300"></p>
+    <ul id="peers" class="text-gray-300 mt-2 space-y-1"></ul>
+    <hr class="my-3 border-gray-700" />
+
+    <button id="generateQR" class="bg-indigo-500 hover:bg-indigo-600 px-4 py-2 rounded font-semibold mt-2">
+      Generate QR Code
+    </button>
+    <div id="qrcode" class="mt-4 flex justify-center"></div>
+  </div>
+
+  <!-- ✅ File Transfer -->
+  <div class="card">
+    <h2 class="text-lg font-semibold mb-2 text-teal-300">File Transfer</h2>
+    <div class="flex flex-col items-center gap-3">
+      <input type="file" id="fileinp" multiple
+        class="bg-gray-800 text-gray-100 rounded px-3 py-1 border border-gray-700 focus:outline-none w-full" />
+      <button id="sendBtn" disabled
+        class="bg-teal-500 hover:bg-teal-600 px-4 py-2 rounded font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
+        Send Files
+      </button>
+    </div>
+  </div>
+
+  <!-- ✅ Logs & Preview -->
+  <div class="card">
+    <h2 class="text-lg font-semibold mb-2 text-teal-300">Logs & Previews</h2>
+    <pre id="log" class="text-gray-200"></pre>
+    <div id="previewArea" class="mt-3 flex flex-wrap gap-2 justify-center"></div>
+  </div>
+
+  <script>
+const log = (msg, id) => {
+  const logBox = document.getElementById('log');
+  if (id) {
+    let line = document.getElementById(id);
+    if (!line) {
+      line = document.createElement('div');
+      line.id = id;
+      logBox.appendChild(line);
+    }
+    line.textContent = msg;
+  } else {
+    const line = document.createElement('div');
+    line.textContent = msg;
+    logBox.appendChild(line);
+  }
+  logBox.scrollTop = logBox.scrollHeight;
+};
+
+let ws, id, peers = [];
+let pc, dc;
+let currentFile = null;
+let reconnectTimer = null;
+
+window.onload = () => {
+  document.getElementById('connect').onclick = connectToSignaller;
+  document.getElementById('sendBtn').onclick = sendFiles;
+  document.getElementById('generateQR').onclick = generateQR;
+};
+
+// Connect to Signaller
+function connectToSignaller() {
+  const url = document.getElementById('signaler').value.trim();
+  if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    log("✅ Connected to signaller: " + url);
+    setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: "ping" }));
+    }, 25000);
+  };
+
+  ws.onerror = () => log("❌ Could not connect — check IP or port.");
+  ws.onclose = () => {
+    log("⚠️ Signaller connection closed. Retrying in 5s...");
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connectToSignaller, 5000);
+  };
+
+  ws.onmessage = async (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "welcome") {
+      id = msg.id;
+      document.getElementById("me").textContent = "You: " + id;
+    }
+    if (msg.type === "peers") {
+      peers = msg.peers;
+      renderPeers();
+    }
+    if (msg.type === "offer" && msg.from) handleOffer(msg.offer, msg.from);
+    if (msg.type === "answer" && msg.from && pc)
+      pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
+    if (msg.type === "ice" && msg.cand && msg.from && pc)
+      pc.addIceCandidate(new RTCIceCandidate(msg.cand)).catch(() => {});
+  };
+}
+
+// Render peer list
+function renderPeers() {
+  const ul = document.getElementById('peers');
+  ul.innerHTML = '';
+  peers.forEach(p => {
+    const li = document.createElement('li');
+    li.textContent = p + ' ';
+    const btn = document.createElement('button');
+    btn.textContent = 'Connect';
+    btn.className = 'bg-sky-600 hover:bg-sky-700 px-2 py-1 rounded text-sm';
+    btn.onclick = () => startCall(p);
+    li.appendChild(btn);
+    ul.appendChild(li);
+  });
+}
+
+// Start peer connection
+async function startCall(target) {
+  pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  pc.onicecandidate = e => { if (e.candidate) ws.send(JSON.stringify({ type: 'ice', target, cand: e.candidate })); };
+  dc = pc.createDataChannel("file");
+  setupDataChannel(dc);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({ type: 'offer', target, offer }));
+  log("📡 Sent offer to " + target);
+}
+
+// Handle offer
+async function handleOffer(offer, from) {
+  pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  pc.onicecandidate = e => { if (e.candidate) ws.send(JSON.stringify({ type: 'ice', target: from, cand: e.candidate })); };
+  pc.ondatachannel = e => { dc = e.channel; setupDataChannel(dc); };
+  await pc.setRemoteDescription(new RTCSessionDescription(offer));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  ws.send(JSON.stringify({ type: 'answer', target: from, answer }));
+  log("📡 Answered offer from " + from);
+}
+
+// Setup data channel
+function setupDataChannel(channel) {
+  channel.binaryType = "arraybuffer";
+  channel.onopen = () => {
+    log("✅ Data channel open — ready to send.");
+    document.getElementById("sendBtn").disabled = false;
+  };
+
+  channel.onclose = () => {
+    log("⚠️ Data channel closed.");
+    document.getElementById("sendBtn").disabled = true;
+  };
+
+  channel.onmessage = (ev) => {
+    if (typeof ev.data === "string") {
+      const meta = JSON.parse(ev.data);
+      currentFile = {
+        name: meta.name,
+        size: meta.size,
+        type: meta.type || "application/octet-stream",
+        chunks: [],
+        received: 0
+      };
+      log(`📥 Receiving: ${meta.name} (${(meta.size / 1024).toFixed(1)} KB)`);
+      return;
+    }
+
+    if (!currentFile) return;
+
+    currentFile.chunks.push(ev.data);
+    currentFile.received += ev.data.byteLength;
+
+    const percent = ((currentFile.received / currentFile.size) * 100).toFixed(2);
+    log(`📊 Receiving: ${percent}%`, "recv-progress");
+
+    if (currentFile.received >= currentFile.size) {
+      finalizeReceivedFile(currentFile);
+      log("✅ File received: " + currentFile.name);
+      currentFile = null;
+      document.getElementById("recv-progress")?.remove();
+    }
+  };
+}
+
+// Save received file
+function finalizeReceivedFile(fileObj) {
+  const blob = new Blob(fileObj.chunks, { type: fileObj.type });
+  const url = URL.createObjectURL(blob);
+
+  const area = document.getElementById("previewArea");
+  const card = document.createElement("div");
+  card.className = "bg-gray-800 p-3 rounded-lg mt-3 w-full max-w-md shadow";
+
+  const name = document.createElement("p");
+  name.innerHTML = `<strong>${fileObj.name}</strong> (${(fileObj.size / 1024).toFixed(1)} KB)`;
+  name.className = "text-teal-300 mb-1";
+
+  const downloadBtn = document.createElement("a");
+  downloadBtn.href = url;
+  downloadBtn.download = fileObj.name;
+  downloadBtn.textContent = "💾 Download File";
+  downloadBtn.className = "bg-teal-600 hover:bg-teal-700 px-3 py-2 mt-2 rounded font-semibold inline-block";
+
+  let preview;
+  if (fileObj.type.startsWith("audio/")) {
+    preview = document.createElement("audio");
+    preview.src = url;
+    preview.controls = true;
+    preview.className = "mt-2 w-full";
+  } else if (fileObj.type.startsWith("video/")) {
+    preview = document.createElement("video");
+    preview.src = url;
+    preview.controls = true;
+    preview.className = "mt-2 w-full rounded-lg";
+  } else if (fileObj.type.startsWith("image/")) {
+    preview = document.createElement("img");
+    preview.src = url;
+    preview.className = "rounded-lg mt-2 max-h-48";
+  }
+
+  card.appendChild(name);
+  card.appendChild(downloadBtn);
+  if (preview) card.appendChild(preview);
+  area.appendChild(card);
+}
+
+// Send files (percent updates in single line)
+async function sendFiles() {
+  if (!dc || dc.readyState !== "open") return alert("Data channel not open");
+  const files = document.getElementById("fileinp").files;
+  if (!files.length) return alert("Select at least one file");
+
+  for (const file of files) {
+    log(`📤 Sending: ${file.name}`);
+    dc.send(JSON.stringify({ name: file.name, size: file.size, type: file.type }));
+
+    const fileBuffer = await file.arrayBuffer();
+    const chunkSize = 64 * 1024;
+    let sentBytes = 0;
+
+    for (let i = 0; i < fileBuffer.byteLength; i += chunkSize) {
+      const chunk = fileBuffer.slice(i, i + chunkSize);
+      while (dc.bufferedAmount > 5 * 1024 * 1024)
+        await new Promise(r => setTimeout(r, 100));
+
+      dc.send(chunk);
+      sentBytes += chunk.byteLength;
+      const percent = ((sentBytes / file.size) * 100).toFixed(2);
+      log(`📦 Sending: ${percent}%`, "send-progress");
+    }
+
+    log(`✅ File sent successfully: ${file.name}`);
+    document.getElementById("send-progress")?.remove();
+  }
+}
+
+// Generate QR code
+function generateQR() {
+  const qrContainer = document.getElementById("qrcode");
+  qrContainer.innerHTML = "";
+  const urlToShare = window.location.href;
+  new QRCode(qrContainer, {
+    text: urlToShare,
+    width: 200,
+    height: 200,
+    colorDark: "#ffffff",
+    colorLight: "#1e293b",
+    correctLevel: QRCode.CorrectLevel.H
+  });
+  log("📱 QR Code generated for: " + urlToShare);
+}
+</script>
+</body>
+</html>
